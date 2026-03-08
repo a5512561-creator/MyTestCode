@@ -1,0 +1,36 @@
+【請轉給有 Graph / 群組管理權限的 IT 或同事】
+
+需要您幫忙查一筆「Planner 計畫 ID」（Graph API 用），只需查一次，約 1 分鐘。
+注意：Power Automate 裡看到的 planId（如 _YIMOMgqSEiTZd0FdWnnMcgACG9P）不是 Graph 用的格式，
+      必須用此 API 回傳的 "id"（GUID 格式）才行。
+
+--- 步驟 ---
+
+1. 開啟 Microsoft Graph 總管並登入（需有 Group.Read.All 或該群組存取權）：
+   https://developer.microsoft.com/zh-tw/graph/graph-explorer
+
+2. 在「請求 URL」輸入以下網址（請依實際群組 ID 替換 0faa7f6e-651a-49a9-a711-e984c482aff0）：
+   https://graph.microsoft.com/v1.0/groups/0faa7f6e-651a-49a9-a711-e984c482aff0/planner/plans
+
+3. 按「執行查詢」。
+
+4. 在回應的 JSON 裡找到 "value" 陣列，裡面會有一個或多個物件，每個物件有一個 "id" 欄位（格式像 xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx）。
+   請把「第一個」計畫的 "id" 值複製下來（整串 GUID）。
+
+5. 將那串 id 回傳給需求者，他會貼到自己的 .env 設定檔作為 PLAN_ID 使用。
+
+--- 範例回應（只需複製 id 的值）---
+
+{
+  "value": [
+    {
+      "id": "請複製這串",
+      "title": "計畫名稱",
+      ...
+    }
+  ]
+}
+
+--- 說明 ---
+
+此 ID 僅用於該同仁本機的工作管理 Agent 讀寫「自己已有權限」的 Planner 任務，不會擴大任何權限。

@@ -1,0 +1,221 @@
+"""工作管理 AI Agent 主程式。"""
+import argparse
+import os
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+# 先載入 .env，否則 USE_POWER_AUTOMATE 等變數會是空的，誤走 Graph 登入
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+
+USE_PA = os.environ.get("USE_POWER_AUTOMATE", "").strip().lower() in ("1", "true", "yes")
+
+if USE_PA:
+    from src.powerautomate_client import (
+        list_planner_tasks,
+        list_planner_tasks_from_file,
+        format_tasks_for_display,
+        schedule_tasks_in_free_slots,
+        schedule_next_week_to_calendar,
+        create_weekly_status_page,
+        build_planner_summary_html,
+        build_calendar_summary_html,
+        build_next_week_report,
+        format_next_week_report_text,
+    )
+else:
+    from src.auth import get_access_token
+    from src.planner_client import list_planner_tasks, format_tasks_for_display, resolve_plan_id
+    from src.calendar_client import schedule_tasks_in_free_slots
+    from src.onenote_client import (
+        create_weekly_status_page,
+        build_planner_summary_html,
+        build_calendar_summary_html,
+    )
+
+
+def run_planner_summary(bucket_names=None):
+    bucket_names = bucket_names or ["本週工作", "進行中"]
+    if USE_PA:
+        flow_url = os.getenv("FLOW_PLANNER_URL", "").strip()
+        tasks_file = os.getenv("TASKS_INPUT_FILE", "").strip()
+        if flow_url:
+            tasks = list_planner_tasks(bucket_names=bucket_names)
+        elif tasks_file:
+            try:
+                tasks = list_planner_tasks_from_file(bucket_names=bucket_names)
+            except FileNotFoundError as e:
+                print(e)
+                print("請先手動執行 GotPlannerTasks Flow，並確認 Flow 已將結果寫入 TASKS_INPUT_FILE 路徑。")
+                return
+            except Exception as e:
+                print("讀取任務檔案失敗：", e)
+                return
+        else:
+            print("請在 .env 設定 FLOW_PLANNER_URL（HTTP 觸發）或 TASKS_INPUT_FILE（手動觸發 Flow 寫入的檔案路徑）。")
+            return
+    else:
+        token = get_access_token()
+        if not os.getenv("PLAN_ID") and not os.getenv("GROUP_ID"):
+            print("請在 .env 設定 PLAN_ID 或 GROUP_ID（Planner 網址中的 tid= 即群組 ID）")
+            return
+        tasks = list_planner_tasks(token, bucket_names=bucket_names)
+    print("=== 到期日接近且高優先的任務 ===\n")
+    print(format_tasks_for_display(tasks))
+    return tasks
+
+
+def run_schedule_to_calendar(tasks=None, duration_minutes=None):
+    if tasks is None:
+        tasks = run_planner_summary()
+        if not tasks:
+            print("沒有可排程的任務。")
+            return
+    if USE_PA:
+        if not os.getenv("FLOW_CALENDAR_URL"):
+            print("請在 .env 設定 FLOW_CALENDAR_URL")
+            return
+        result = schedule_tasks_in_free_slots(tasks, duration_minutes=duration_minutes)
+    else:
+        token = get_access_token()
+        result = schedule_tasks_in_free_slots(token, tasks, duration_minutes=duration_minutes)
+    print("\n=== 已建立行事曆事件 ===")
+    for item in result["created"]:
+        ev = item["event"]
+        if USE_PA:
+            print(f"  - {ev.get('subject', item.get('task', {}).get('title'))} 已建立")
+        else:
+            print(f"  - {ev.get('subject')} @ {ev.get('start', {}).get('dateTime')}")
+    if result["failed"]:
+        print("\n無法排入的任務：", [t.get("title") for t in result["failed"]])
+
+
+def run_weekly_status_to_onenote():
+    if USE_PA:
+        if not os.getenv("FLOW_ONENOTE_URL"):
+            print("請在 .env 設定 FLOW_ONENOTE_URL")
+            return
+        planner_html = build_planner_summary_html()
+        calendar_html = build_calendar_summary_html()
+        page = create_weekly_status_page(
+            planner_summary=planner_html,
+            calendar_summary=calendar_html,
+        )
+    else:
+        token = get_access_token()
+        section_id = os.getenv("ONENOTE_SECTION_ID")
+        if not section_id:
+            print("請設定環境變數 ONENOTE_SECTION_ID")
+            return
+        try:
+            plan_id = resolve_plan_id(token)
+            planner_html = build_planner_summary_html(token, plan_id)
+        except Exception:
+            planner_html = "<p>未設定 PLAN_ID/GROUP_ID 或無法取得計畫</p>"
+        calendar_html = build_calendar_summary_html(token)
+        page = create_weekly_status_page(
+            token,
+            planner_summary=planner_html,
+            calendar_summary=calendar_html,
+        )
+    print("OneNote 週報頁面已建立：", page.get("contentUrl", page.get("id", "")))
+
+
+def run_schedule_nextweek():
+    """將「延續到下週」與「下週到期需準備」排入 Outlook 行事曆（需 FLOW_CALENDAR_URL）。"""
+    if not USE_PA:
+        print("排入下週行事曆目前僅支援 Power Automate 模式，請設 USE_POWER_AUTOMATE=true 與 TASKS_INPUT_FILE、FLOW_CALENDAR_URL。")
+        return
+    if not os.getenv("FLOW_CALENDAR_URL", "").strip():
+        print("請在 .env 設定 FLOW_CALENDAR_URL（Power Automate「建立 Outlook 事件」Flow 的 HTTP POST URL）。")
+        return
+    try:
+        result = schedule_next_week_to_calendar(include_tasks_without_estimate=True)
+    except FileNotFoundError as e:
+        print(e)
+        print("請先手動執行 GotPlannerTasks Flow，並確認已寫入 TASKS_INPUT_FILE。")
+        return
+    except Exception as e:
+        print("排入行事曆失敗：", e)
+        return
+    if result.get("message"):
+        print(result["message"])
+        return
+    print("\n=== 已建立行事曆事件（下週一 9:00 起）===")
+    for item in result.get("created", []):
+        task = item.get("task", {})
+        ev = item.get("event", {})
+        mins = task.get("estimatedMinutes")
+        dur = f" {mins} 分" if mins else ""
+        print(f"  - {task.get('title', ev.get('subject', ''))}{dur}")
+    if result.get("failed"):
+        print("\n無法排入的任務：", [t.get("title") for t in result["failed"]])
+
+
+def run_nextweek():
+    """產出下週待排清單：Carryover、UpcomingDue、Triage 與總估時。"""
+    if not USE_PA:
+        print("下週待排清單（nextweek）目前僅支援 Power Automate 讀檔模式，請設 USE_POWER_AUTOMATE=true 與 TASKS_INPUT_FILE。")
+        return
+    try:
+        report = build_next_week_report()
+        print(format_next_week_report_text(report))
+    except FileNotFoundError as e:
+        print(e)
+        print("請先手動執行 GotPlannerTasks Flow，並確認 Flow 已將結果寫入 TASKS_INPUT_FILE 路徑。")
+    except Exception as e:
+        print("產生下週報表失敗：", e)
+
+
+def run_guide():
+    """手動觸發 Flow 時的指引：Agent 印出待辦順序與提醒。"""
+    from pathlib import Path
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+    print("=== 工作管理：手動觸發 Flow 指引 ===\n")
+    print("你目前使用「手動觸發」Power Automate Flow（無 Premium / 無 HTTP 觸發）。")
+    print("請依以下順序在 Power Automate 中手動執行你的 Flow：\n")
+    print("1. 【整理本週任務】")
+    print("   開啟 Power Automate → 執行 Flow「GotPlannerTasks」（或你建立的「列出 Planner 任務」Flow）。")
+    print("   若 Flow 有設定把結果寫到 OneDrive/Email，可查看任務清單。\n")
+    print("2. 【排入行事曆】")
+    print("   執行你建立的「建立行事曆事件」Flow（需在 Flow 內選好要排的任務或時間）。")
+    print("   或手動將任務複製到 Outlook 行事曆。\n")
+    print("3. 【每週三：寫入 OneNote 週報】")
+    print("   執行「建立 OneNote 週報」Flow，或手動整理本週進展到 OneNote。\n")
+    print("---")
+    print("之後若要改為「Agent 自動呼叫 Flow」，需 Power Automate Premium（HTTP 觸發）或改回方案 A（管理員核准 App）。")
+    print("執行本指引： py -m src.agent guide\n")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("action", choices=["planner", "schedule", "onenote", "all", "guide", "nextweek", "schedule-nextweek"])
+    parser.add_argument("--bucket", nargs="*", default=None)
+    parser.add_argument("--duration", type=int, default=None)
+    args = parser.parse_args()
+    if args.action == "guide":
+        run_guide()
+        return
+    if args.action == "nextweek":
+        run_nextweek()
+        return
+    if args.action == "schedule-nextweek":
+        run_schedule_nextweek()
+        return
+    if args.action == "planner":
+        run_planner_summary(bucket_names=args.bucket)
+    elif args.action == "schedule":
+        run_schedule_to_calendar(duration_minutes=args.duration)
+    elif args.action == "onenote":
+        run_weekly_status_to_onenote()
+    elif args.action == "all":
+        tasks = run_planner_summary(bucket_names=args.bucket)
+        if tasks:
+            run_schedule_to_calendar(tasks=tasks, duration_minutes=args.duration)
+        print("\n若要寫入 OneNote 週報，請執行: python -m src.agent onenote")
+
+
+if __name__ == "__main__":
+    main()
