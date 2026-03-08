@@ -23,6 +23,8 @@ FLOW_PLANNER_URL = os.environ.get("FLOW_PLANNER_URL", "").strip()
 FLOW_CALENDAR_URL = os.environ.get("FLOW_CALENDAR_URL", "").strip()
 FLOW_ONENOTE_URL = os.environ.get("FLOW_ONENOTE_URL", "").strip()
 TASKS_INPUT_FILE = os.environ.get("TASKS_INPUT_FILE", "").strip()
+SCHEDULE_OUTPUT_FILE = os.environ.get("SCHEDULE_OUTPUT_FILE", "").strip()
+SCHEDULE_LIMIT = int(os.environ.get("SCHEDULE_LIMIT", "0") or "0")  # 寫入 schedule_requests.json 的筆數上限，0=不限制（測試可設 2）
 DEFAULT_DURATION_MIN = int(os.environ.get("DEFAULT_TASK_DURATION_MINUTES", "60"))
 DUE_WITHIN_DAYS = int(os.environ.get("DUE_WITHIN_DAYS", "7"))
 HIGH_PRIORITY_THRESHOLD = int(os.environ.get("HIGH_PRIORITY_THRESHOLD", "7"))
@@ -496,6 +498,68 @@ def schedule_next_week_to_calendar(
         duration_minutes=default_dur,
         start_from=first_slot,
     )
+
+
+def write_schedule_requests_to_file(
+    file_path: Optional[str] = None,
+    tz_name: Optional[str] = None,
+    default_duration_minutes: Optional[int] = None,
+    include_tasks_without_estimate: bool = True,
+) -> dict[str, Any]:
+    """
+    將「延續到下週」與「下週到期需準備」的排程寫入 JSON 檔，供手動觸發的 Flow 讀取並建立 Outlook 事件（無 HTTP 觸發時使用）。
+    檔案格式：{"events": [{"subject","start","end","body"}, ...]}
+    """
+    report = build_next_week_report(file_path=file_path, tz_name=tz_name)
+    carryover = report.get("carryover", [])
+    upcoming = report.get("upcoming_due", [])
+    tasks = carryover + upcoming
+    if not tasks:
+        return {"written_file": None, "events_count": 0, "events": [], "message": "沒有下週待排任務。"}
+
+    default_dur = default_duration_minutes or DEFAULT_DURATION_MIN
+    if not include_tasks_without_estimate:
+        tasks = [t for t in tasks if t.get("estimatedMinutes") is not None and t.get("estimatedMinutes", 0) > 0]
+        if not tasks:
+            return {"written_file": None, "events_count": 0, "events": [], "message": "所有任務皆缺估時。請在標題加 [2h] 等後再執行。"}
+
+    start_monday = report.get("next_week_start")
+    if start_monday is None:
+        start_monday = datetime.now(timezone.utc)
+    first_slot = start_monday.replace(hour=9, minute=0, second=0, microsecond=0)
+    if first_slot.tzinfo is None:
+        first_slot = first_slot.replace(tzinfo=timezone.utc)
+
+    events = []
+    start = first_slot
+    for task in tasks:
+        mins = task.get("estimatedMinutes") or default_dur
+        if mins <= 0:
+            mins = default_dur
+        title = task.get("title", "Planner 任務")
+        end = start + timedelta(minutes=mins)
+        start_iso = start.isoformat().replace("+00:00", "Z")
+        end_iso = end.isoformat().replace("+00:00", "Z")
+        events.append({
+            "subject": title,
+            "start": start_iso,
+            "end": end_iso,
+            "body": f"Planner 任務 ID: {task.get('id', '')}",
+        })
+        start = end
+        if SCHEDULE_LIMIT > 0 and len(events) >= SCHEDULE_LIMIT:
+            break
+
+    out_path = file_path or SCHEDULE_OUTPUT_FILE
+    if not out_path:
+        return {"written_file": None, "events_count": len(events), "events": events, "message": "請在 .env 設定 SCHEDULE_OUTPUT_FILE（寫入路徑，例如與 TASKS_INPUT_FILE 同資料夾的 schedule_requests.json）。"}
+
+    p = Path(out_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"events": events}
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    return {"written_file": str(p), "events_count": len(events), "events": events}
 
 
 def create_weekly_status_page(

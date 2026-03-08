@@ -18,6 +18,7 @@ if USE_PA:
         format_tasks_for_display,
         schedule_tasks_in_free_slots,
         schedule_next_week_to_calendar,
+        write_schedule_requests_to_file,
         create_weekly_status_page,
         build_planner_summary_html,
         build_calendar_summary_html,
@@ -123,34 +124,64 @@ def run_weekly_status_to_onenote():
 
 
 def run_schedule_nextweek():
-    """將「延續到下週」與「下週到期需準備」排入 Outlook 行事曆（需 FLOW_CALENDAR_URL）。"""
+    """將「延續到下週」與「下週到期需準備」排入 Outlook 行事曆。有 FLOW_CALENDAR_URL 則 HTTP 觸發；否則寫入 SCHEDULE_OUTPUT_FILE 供手動觸發 Flow 讀取。"""
     if not USE_PA:
-        print("排入下週行事曆目前僅支援 Power Automate 模式，請設 USE_POWER_AUTOMATE=true 與 TASKS_INPUT_FILE、FLOW_CALENDAR_URL。")
+        print("排入下週行事曆目前僅支援 Power Automate 模式，請設 USE_POWER_AUTOMATE=true 與 TASKS_INPUT_FILE。")
         return
-    if not os.getenv("FLOW_CALENDAR_URL", "").strip():
-        print("請在 .env 設定 FLOW_CALENDAR_URL（Power Automate「建立 Outlook 事件」Flow 的 HTTP POST URL）。")
+    flow_url = os.getenv("FLOW_CALENDAR_URL", "").strip()
+    schedule_file = os.getenv("SCHEDULE_OUTPUT_FILE", "").strip()
+    if flow_url:
+        try:
+            result = schedule_next_week_to_calendar(include_tasks_without_estimate=True)
+        except FileNotFoundError as e:
+            print(e)
+            print("請先手動執行 GotPlannerTasks Flow，並確認已寫入 TASKS_INPUT_FILE。")
+            return
+        except Exception as e:
+            print("排入行事曆失敗：", e)
+            return
+        if result.get("message"):
+            print(result["message"])
+            return
+        print("\n=== 已建立行事曆事件（下週一 9:00 起）===")
+        for item in result.get("created", []):
+            task = item.get("task", {})
+            ev = item.get("event", {})
+            mins = task.get("estimatedMinutes")
+            dur = f" {mins} 分" if mins else ""
+            print(f"  - {task.get('title', ev.get('subject', ''))}{dur}")
+        if result.get("failed"):
+            print("\n無法排入的任務：", [t.get("title") for t in result["failed"]])
         return
-    try:
-        result = schedule_next_week_to_calendar(include_tasks_without_estimate=True)
-    except FileNotFoundError as e:
-        print(e)
-        print("請先手動執行 GotPlannerTasks Flow，並確認已寫入 TASKS_INPUT_FILE。")
+    if schedule_file:
+        try:
+            result = write_schedule_requests_to_file(include_tasks_without_estimate=True)
+        except FileNotFoundError as e:
+            print(e)
+            print("請先手動執行 GotPlannerTasks Flow，並確認已寫入 TASKS_INPUT_FILE。")
+            return
+        except Exception as e:
+            print("寫入排程檔失敗：", e)
+            return
+        if result.get("message"):
+            print(result["message"])
+            if not result.get("written_file"):
+                return
+        path = result.get("written_file", "")
+        n = result.get("events_count", 0)
+        print(f"\n已將 {n} 筆行事曆事件寫入：{path}")
+        print("\n請依序完成：")
+        print("  1. 等待 OneDrive 同步該檔案（若路徑在 OneDrive 資料夾內）。")
+        print("  2. 到 Power Automate 手動執行「從檔案建立 Outlook 事件」Flow。")
+        print("  3. 到 Outlook 行事曆確認事件已建立。")
+        if n > 0:
+            print("\n本批事件（下週一 9:00 起）：")
+            for ev in result.get("events", [])[:15]:
+                print(f"  - {ev.get('subject', '')}")
+            if n > 15:
+                print(f"  ... 共 {n} 筆")
         return
-    except Exception as e:
-        print("排入行事曆失敗：", e)
-        return
-    if result.get("message"):
-        print(result["message"])
-        return
-    print("\n=== 已建立行事曆事件（下週一 9:00 起）===")
-    for item in result.get("created", []):
-        task = item.get("task", {})
-        ev = item.get("event", {})
-        mins = task.get("estimatedMinutes")
-        dur = f" {mins} 分" if mins else ""
-        print(f"  - {task.get('title', ev.get('subject', ''))}{dur}")
-    if result.get("failed"):
-        print("\n無法排入的任務：", [t.get("title") for t in result["failed"]])
+    print("請在 .env 設定 FLOW_CALENDAR_URL（HTTP 觸發）或 SCHEDULE_OUTPUT_FILE（手動觸發時 Agent 寫入的排程檔路徑）。")
 
 
 def run_nextweek():
