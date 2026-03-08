@@ -31,6 +31,15 @@ HIGH_PRIORITY_THRESHOLD = int(os.environ.get("HIGH_PRIORITY_THRESHOLD", "7"))
 LOCAL_TIMEZONE = os.environ.get("LOCAL_TIMEZONE", "Asia/Taipei").strip()
 NEXT_WEEK_BUCKETS_STR = os.environ.get("NEXT_WEEK_BUCKETS", "本週工作,進行中").strip()
 NOT_STARTED_BUCKET = os.environ.get("NOT_STARTED_BUCKET", "未開始").strip()
+# 工作時段（避開會議用）：當地時間，格式 HH:MM；WORK_DAYS 為 0=一 … 6=日，逗號分隔
+WORK_DAY_START = os.environ.get("WORK_DAY_START", "09:00").strip()
+WORK_DAY_END = os.environ.get("WORK_DAY_END", "18:00").strip()
+LUNCH_START = os.environ.get("LUNCH_START", "12:00").strip()
+LUNCH_END = os.environ.get("LUNCH_END", "13:00").strip()
+DINNER_START = os.environ.get("DINNER_START", "18:00").strip()
+DINNER_END = os.environ.get("DINNER_END", "19:00").strip()
+_WORK_DAYS_STR = os.environ.get("WORK_DAYS", "0,1,2,3,4").strip()
+WORK_DAYS = set(int(x.strip()) for x in _WORK_DAYS_STR.split(",") if x.strip().isdigit()) if _WORK_DAYS_STR else {0, 1, 2, 3, 4}
 
 
 def _parse_and_filter_tasks(
@@ -144,6 +153,184 @@ def get_next_week_range(tz_name: str) -> tuple[datetime, datetime]:
     )
     end = start + timedelta(days=6, hours=23, minutes=59, seconds=59, microseconds=999999)
     return start, end
+
+
+def _parse_time(s: str) -> tuple[int, int]:
+    """Parse 'HH:MM' or 'H:MM' to (hour, minute)."""
+    if not s or ":" not in s:
+        return 9, 0
+    parts = s.strip().split(":", 1)
+    try:
+        h, m = int(parts[0].strip()), int(parts[1].strip()) if len(parts) > 1 else 0
+        return max(0, min(23, h)), max(0, min(59, m))
+    except ValueError:
+        return 9, 0
+
+
+def build_work_windows(
+    week_start: datetime,
+    week_end: datetime,
+    tz: Any,
+) -> list[tuple[datetime, datetime]]:
+    """
+    在 week_start..week_end 內，依 WORK_DAY_* 與 WORK_DAYS 產出可排工作的時段（每個工作日扣除午休、晚餐）。
+    六日不排：WORK_DAYS 預設 0,1,2,3,4（一～五）。
+    """
+    if week_start.tzinfo is None:
+        week_start = week_start.replace(tzinfo=timezone.utc)
+    if week_end.tzinfo is None:
+        week_end = week_end.replace(tzinfo=timezone.utc)
+    if tz is not None and week_start.tzinfo != tz:
+        week_start = week_start.astimezone(tz)
+        week_end = week_end.astimezone(tz)
+    sh, sm = _parse_time(WORK_DAY_START)
+    eh, em = _parse_time(WORK_DAY_END)
+    lsh, lsm = _parse_time(LUNCH_START)
+    leh, lem = _parse_time(LUNCH_END)
+    dsh, dsm = _parse_time(DINNER_START)
+    deh, dem = _parse_time(DINNER_END)
+    windows: list[tuple[datetime, datetime]] = []
+    current = week_start.replace(hour=0, minute=0, second=0, microsecond=0)
+    one_day = timedelta(days=1)
+    while current <= week_end:
+        if current.weekday() not in WORK_DAYS:
+            current += one_day
+            continue
+        # [WORK_DAY_START, LUNCH_START)
+        w1_s = current.replace(hour=sh, minute=sm, second=0, microsecond=0)
+        w1_e = current.replace(hour=lsh, minute=lsm, second=0, microsecond=0)
+        if w1_s < w1_e:
+            windows.append((w1_s, w1_e))
+        # [LUNCH_END, DINNER_START)
+        w2_s = current.replace(hour=leh, minute=lem, second=0, microsecond=0)
+        w2_e = current.replace(hour=dsh, minute=dsm, second=0, microsecond=0)
+        if w2_s < w2_e:
+            windows.append((w2_s, w2_e))
+        # [DINNER_END, WORK_DAY_END)
+        w3_s = current.replace(hour=deh, minute=dem, second=0, microsecond=0)
+        w3_e = current.replace(hour=eh, minute=em, second=0, microsecond=0)
+        if w3_s < w3_e:
+            windows.append((w3_s, w3_e))
+        current += one_day
+    return windows
+
+
+def _event_to_interval(ev: dict) -> Optional[tuple[datetime, datetime]]:
+    """從 Outlook/Graph 事件取出 start/end 轉成 (start_dt, end_dt)。支援 start/end 字串或 start.dateTime。"""
+    start_val = ev.get("start") or ev.get("Start")
+    end_val = ev.get("end") or ev.get("End")
+    if isinstance(start_val, dict):
+        start_val = start_val.get("dateTime") or start_val.get("DateTime")
+    if isinstance(end_val, dict):
+        end_val = end_val.get("dateTime") or end_val.get("DateTime")
+    if not start_val or not end_val:
+        return None
+    try:
+        s = start_val.replace("Z", "+00:00") if isinstance(start_val, str) else str(start_val)
+        e = end_val.replace("Z", "+00:00") if isinstance(end_val, str) else str(end_val)
+        start_dt = datetime.fromisoformat(s)
+        end_dt = datetime.fromisoformat(e)
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=timezone.utc)
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=timezone.utc)
+        return (start_dt, end_dt)
+    except Exception:
+        return None
+
+
+def busy_to_free(
+    work_windows: list[tuple[datetime, datetime]],
+    busy_list: list[tuple[datetime, datetime]],
+) -> list[tuple[datetime, datetime]]:
+    """從可工作時段扣掉 busy 區間，得到空檔（已排序）。"""
+    free: list[tuple[datetime, datetime]] = []
+    for ws, we in work_windows:
+        gaps = [(ws, we)]
+        for bs, be in busy_list:
+            new_gaps: list[tuple[datetime, datetime]] = []
+            for gs, ge in gaps:
+                if be <= gs or bs >= ge:
+                    new_gaps.append((gs, ge))
+                    continue
+                if bs > gs:
+                    new_gaps.append((gs, min(ge, bs)))
+                if be < ge:
+                    new_gaps.append((max(gs, be), ge))
+            gaps = [g for g in new_gaps if g[1] > g[0]]
+        free.extend(gaps)
+    free.sort(key=lambda x: x[0])
+    return free
+
+
+def find_first_slot_for_duration(
+    free_slots: list[tuple[datetime, datetime]],
+    duration_minutes: int,
+) -> Optional[tuple[datetime, datetime]]:
+    """回傳 (slot_start, slot_end)，並從 free_slots 中扣除已使用的區間。"""
+    delta = timedelta(minutes=duration_minutes)
+    for i, (fs, fe) in enumerate(free_slots):
+        if (fe - fs) >= delta:
+            end_booking = fs + delta
+            if end_booking < fe:
+                free_slots[i] = (end_booking, fe)
+            else:
+                free_slots.pop(i)
+            return (fs, end_booking)
+    return None
+
+
+def _is_all_day_or_reminder_event(ev: dict) -> bool:
+    """全天或跨日提醒類事件不納入忙碌時段（不擋排程）。"""
+    if ev.get("isAllDay") is True or ev.get("IsAllDay") is True:
+        return True
+    start_val = ev.get("start") or ev.get("Start")
+    end_val = ev.get("end") or ev.get("End")
+    if isinstance(start_val, dict):
+        start_val = start_val.get("dateTime") or start_val.get("date") or ""
+    if isinstance(end_val, dict):
+        end_val = end_val.get("dateTime") or end_val.get("date") or ""
+    s = str(start_val) if start_val else ""
+    e = str(end_val) if end_val else ""
+    if len(s) <= 10 and len(e) <= 10:
+        return True
+    if "T" not in s or "T" not in e:
+        return True
+    try:
+        start_dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        end_dt = datetime.fromisoformat(e.replace("Z", "+00:00"))
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=timezone.utc)
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=timezone.utc)
+        if (end_dt - start_dt).total_seconds() >= 24 * 3600:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def load_calendar_events_from_file(file_path: Optional[str] = None) -> list[tuple[datetime, datetime]]:
+    """從 TASKS_INPUT_FILE 的 JSON 讀取 calendarEvents，轉成 (start, end) 區間列表。全天／跨日提醒事件會略過。"""
+    path = file_path or TASKS_INPUT_FILE
+    if not path or not Path(path).exists():
+        return []
+    with open(Path(path), "r", encoding="utf-8") as f:
+        data = json.load(f)
+    raw = data.get("calendarEvents") or data.get("calendar_events") or []
+    if isinstance(raw, dict) and "value" in raw:
+        raw = raw["value"]
+    intervals: list[tuple[datetime, datetime]] = []
+    for ev in raw or []:
+        if not isinstance(ev, dict):
+            continue
+        if _is_all_day_or_reminder_event(ev):
+            continue
+        interval = _event_to_interval(ev)
+        if interval:
+            intervals.append(interval)
+    intervals.sort(key=lambda x: x[0])
+    return intervals
 
 
 def load_raw_tasks_and_buckets_from_file(
@@ -508,6 +695,8 @@ def write_schedule_requests_to_file(
 ) -> dict[str, Any]:
     """
     將「延續到下週」與「下週到期需準備」的排程寫入 JSON 檔，供手動觸發的 Flow 讀取並建立 Outlook 事件（無 HTTP 觸發時使用）。
+    若有 calendarEvents 與工作時段設定，僅排入空檔（避開會議與午休/晚餐）；否則從下週一 9:00 起依序排。
+    回傳含 events、not_scheduled（無法排入的任務）。
     檔案格式：{"events": [{"subject","start","end","body"}, ...]}
     """
     report = build_next_week_report(file_path=file_path, tz_name=tz_name)
@@ -515,51 +704,69 @@ def write_schedule_requests_to_file(
     upcoming = report.get("upcoming_due", [])
     tasks = carryover + upcoming
     if not tasks:
-        return {"written_file": None, "events_count": 0, "events": [], "message": "沒有下週待排任務。"}
+        return {"written_file": None, "events_count": 0, "events": [], "not_scheduled": [], "message": "沒有下週待排任務。"}
 
     default_dur = default_duration_minutes or DEFAULT_DURATION_MIN
     if not include_tasks_without_estimate:
         tasks = [t for t in tasks if t.get("estimatedMinutes") is not None and t.get("estimatedMinutes", 0) > 0]
         if not tasks:
-            return {"written_file": None, "events_count": 0, "events": [], "message": "所有任務皆缺估時。請在標題加 [2h] 等後再執行。"}
+            return {"written_file": None, "events_count": 0, "events": [], "not_scheduled": [], "message": "所有任務皆缺估時。請在標題加 [2h] 等後再執行。"}
 
-    start_monday = report.get("next_week_start")
-    if start_monday is None:
-        start_monday = datetime.now(timezone.utc)
-    first_slot = start_monday.replace(hour=9, minute=0, second=0, microsecond=0)
-    if first_slot.tzinfo is None:
-        first_slot = first_slot.replace(tzinfo=timezone.utc)
+    tz = timezone.utc
+    if ZoneInfo and (tz_name or LOCAL_TIMEZONE):
+        try:
+            tz = ZoneInfo(tz_name or LOCAL_TIMEZONE)
+        except Exception:
+            pass
+    week_start = report.get("next_week_start")
+    week_end = report.get("next_week_end")
+    if week_start is None:
+        week_start = datetime.now(tz)
+    if week_end is None:
+        week_end = week_start + timedelta(days=6, hours=23, minutes=59, seconds=59, microseconds=999999)
+    if week_start.tzinfo is None:
+        week_start = week_start.replace(tzinfo=tz)
+    if week_end.tzinfo is None:
+        week_end = week_end.replace(tzinfo=tz)
 
-    events = []
-    start = first_slot
-    for task in tasks:
+    work_windows = build_work_windows(week_start, week_end, tz)
+    busy_list = load_calendar_events_from_file(file_path or TASKS_INPUT_FILE)
+    free_slots = busy_to_free(work_windows, busy_list)
+
+    events: list[dict[str, Any]] = []
+    not_scheduled: list[dict[str, Any]] = []
+    for i, task in enumerate(tasks):
         mins = task.get("estimatedMinutes") or default_dur
         if mins <= 0:
             mins = default_dur
         title = task.get("title", "Planner 任務")
-        end = start + timedelta(minutes=mins)
-        start_iso = start.isoformat().replace("+00:00", "Z")
-        end_iso = end.isoformat().replace("+00:00", "Z")
-        events.append({
-            "subject": title,
-            "start": start_iso,
-            "end": end_iso,
-            "body": f"Planner 任務 ID: {task.get('id', '')}",
-        })
-        start = end
-        if SCHEDULE_LIMIT > 0 and len(events) >= SCHEDULE_LIMIT:
-            break
+        slot = find_first_slot_for_duration(free_slots, mins)
+        if slot:
+            start_dt, end_dt = slot
+            start_iso = start_dt.isoformat().replace("+00:00", "Z")
+            end_iso = end_dt.isoformat().replace("+00:00", "Z")
+            events.append({
+                "subject": title,
+                "start": start_iso,
+                "end": end_iso,
+                "body": f"Planner 任務 ID: {task.get('id', '')}",
+            })
+            if SCHEDULE_LIMIT > 0 and len(events) >= SCHEDULE_LIMIT:
+                not_scheduled.extend(tasks[i + 1 :])
+                break
+        else:
+            not_scheduled.append(task)
 
-    out_path = file_path or SCHEDULE_OUTPUT_FILE
+    out_path = SCHEDULE_OUTPUT_FILE
     if not out_path:
-        return {"written_file": None, "events_count": len(events), "events": events, "message": "請在 .env 設定 SCHEDULE_OUTPUT_FILE（寫入路徑，例如與 TASKS_INPUT_FILE 同資料夾的 schedule_requests.json）。"}
+        return {"written_file": None, "events_count": len(events), "events": events, "not_scheduled": not_scheduled, "message": "請在 .env 設定 SCHEDULE_OUTPUT_FILE（寫入路徑，例如與 TASKS_INPUT_FILE 同資料夾的 schedule_requests.json）。"}
 
     p = Path(out_path)
     p.parent.mkdir(parents=True, exist_ok=True)
     payload = {"events": events}
     with open(p, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
-    return {"written_file": str(p), "events_count": len(events), "events": events}
+    return {"written_file": str(p), "events_count": len(events), "events": events, "not_scheduled": not_scheduled}
 
 
 def create_weekly_status_page(

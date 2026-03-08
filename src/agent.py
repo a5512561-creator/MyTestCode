@@ -175,11 +175,18 @@ def run_schedule_nextweek():
         print("  2. 到 Power Automate 手動執行「從檔案建立 Outlook 事件」Flow。")
         print("  3. 到 Outlook 行事曆確認事件已建立。")
         if n > 0:
-            print("\n本批事件（下週一 9:00 起）：")
+            print("\n本批事件（已排入空檔）：")
             for ev in result.get("events", [])[:15]:
                 print(f"  - {ev.get('subject', '')}")
             if n > 15:
                 print(f"  ... 共 {n} 筆")
+        not_scheduled = result.get("not_scheduled", [])
+        if not_scheduled:
+            print("\n無法排入空檔的任務（請手動安排或延後）：")
+            for t in not_scheduled[:20]:
+                print(f"  - {t.get('title', '')}")
+            if len(not_scheduled) > 20:
+                print(f"  ... 共 {len(not_scheduled)} 筆")
         return
     print("請在 .env 設定 FLOW_CALENDAR_URL（HTTP 觸發）或 SCHEDULE_OUTPUT_FILE（手動觸發時 Agent 寫入的排程檔路徑）。")
 
