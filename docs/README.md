@@ -19,8 +19,17 @@
 |------|------|
 | [Flow1_手動觸發寫入檔案.md](Flow1_手動觸發寫入檔案.md) | Flow 1：手動觸發，寫入 tasks_output.json（中文） |
 | [Flow1_StepByStep_EN.md](Flow1_StepByStep_EN.md) | Flow 1：同上，英文介面逐步版 |
+| [Flow1_行事曆_上週與下週日期運算式.md](Flow1_行事曆_上週與下週日期運算式.md) | Get calendar view：Start/End 的 fx 運算式（上週一～下週日） |
 | [Flow2_手動觸發_從檔案建立事件.md](Flow2_手動觸發_從檔案建立事件.md) | Flow 2：讀取 schedule_requests.json，在 Outlook 建立事件 |
 | [避開會議與工作時段_實作指引.md](避開會議與工作時段_實作指引.md) | Part A：Flow 1 加入下週行事曆；Part B：Agent 只排入空檔 |
+
+---
+
+## OneNote 週報
+
+| 文件 | 說明 |
+|------|------|
+| [OneNote_週報自動化_設計討論.md](OneNote_週報自動化_設計討論.md) | 週報要寫哪些任務、資料來源、表格格式、Agent 流程與實作階段 |
 
 ---
 
