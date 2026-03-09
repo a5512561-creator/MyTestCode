@@ -170,7 +170,10 @@ def run_schedule_nextweek():
                 return
         path = result.get("written_file", "")
         n = result.get("events_count", 0)
-        print(f"\n已將 {n} 筆行事曆事件寫入：{path}")
+        ws = result.get("week_start_date")
+        we = result.get("week_end_date")
+        week_label = f"（排入 {ws} ~ {we}）" if ws and we else ""
+        print(f"\n已將 {n} 筆行事曆事件寫入：{path} {week_label}")
         print("\n請依序完成：")
         print("  1. 等待 OneDrive 同步該檔案（若路徑在 OneDrive 資料夾內）。")
         print("  2. 到 Power Automate 手動執行「從檔案建立 Outlook 事件」Flow。")

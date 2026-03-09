@@ -940,13 +940,13 @@ def write_schedule_requests_to_file(
     upcoming = report.get("upcoming_due", [])
     tasks = carryover + upcoming
     if not tasks:
-        return {"written_file": None, "events_count": 0, "events": [], "not_scheduled": [], "message": "沒有下週待排任務。"}
+        return {"written_file": None, "events_count": 0, "events": [], "not_scheduled": [], "message": "沒有下週待排任務。", "week_start_date": None, "week_end_date": None}
 
     default_dur = default_duration_minutes or DEFAULT_DURATION_MIN
     if not include_tasks_without_estimate:
         tasks = [t for t in tasks if t.get("estimatedMinutes") is not None and t.get("estimatedMinutes", 0) > 0]
         if not tasks:
-            return {"written_file": None, "events_count": 0, "events": [], "not_scheduled": [], "message": "所有任務皆缺估時。請在標題加 [2h] 等後再執行。"}
+            return {"written_file": None, "events_count": 0, "events": [], "not_scheduled": [], "message": "所有任務皆缺估時。請在標題加 [2h] 等後再執行。", "week_start_date": None, "week_end_date": None}
 
     tz = timezone.utc
     if ZoneInfo and (tz_name or LOCAL_TIMEZONE):
@@ -964,6 +964,12 @@ def write_schedule_requests_to_file(
         week_start = week_start.replace(tzinfo=tz)
     if week_end.tzinfo is None:
         week_end = week_end.replace(tzinfo=tz)
+
+    # 週一執行時改排入「本週」（與行事曆同一週），其餘日子仍排「下週」
+    now_local = datetime.now(tz)
+    if now_local.weekday() == 0:
+        week_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        week_end = week_start + timedelta(days=6, hours=23, minutes=59, seconds=59, microseconds=999999)
 
     work_windows = build_work_windows(week_start, week_end, tz)
     busy_list = load_calendar_events_from_file(file_path or TASKS_INPUT_FILE)
@@ -995,14 +1001,21 @@ def write_schedule_requests_to_file(
 
     out_path = SCHEDULE_OUTPUT_FILE
     if not out_path:
-        return {"written_file": None, "events_count": len(events), "events": events, "not_scheduled": not_scheduled, "message": "請在 .env 設定 SCHEDULE_OUTPUT_FILE（寫入路徑，例如與 TASKS_INPUT_FILE 同資料夾的 schedule_requests.json）。"}
+        return {"written_file": None, "events_count": len(events), "events": events, "not_scheduled": not_scheduled, "message": "請在 .env 設定 SCHEDULE_OUTPUT_FILE（寫入路徑，例如與 TASKS_INPUT_FILE 同資料夾的 schedule_requests.json）。", "week_start_date": week_start.date() if week_start else None, "week_end_date": week_end.date() if week_end else None}
 
     p = Path(out_path)
     p.parent.mkdir(parents=True, exist_ok=True)
     payload = {"events": events}
     with open(p, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
-    return {"written_file": str(p), "events_count": len(events), "events": events, "not_scheduled": not_scheduled}
+    return {
+        "written_file": str(p),
+        "events_count": len(events),
+        "events": events,
+        "not_scheduled": not_scheduled,
+        "week_start_date": week_start.date() if week_start else None,
+        "week_end_date": week_end.date() if week_end else None,
+    }
 
 
 def create_weekly_status_page(

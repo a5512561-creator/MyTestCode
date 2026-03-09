@@ -33,16 +33,18 @@ py -X utf8 src/agent.py nextweek
 - 下週一 00:00 ～ 下週日 23:59（依 `LOCAL_TIMEZONE`）。
 - 需 Python 3.9+ 的 `zoneinfo`；若無則以 UTC 計算。
 
+**排程窗格（schedule-nextweek）**：依預設會排入「下週」。**若在週一執行**，則改為排入「本週」（當天所屬週一～日），以便與 Flow 抓到的本週行事曆一致、正確避開會議；週二～日執行時仍排入下週。執行完成後會顯示「排入 YYYY-MM-DD ~ YYYY-MM-DD」供確認。
+
 ---
 
 ## 排入 Outlook 行事曆
 
-在 `.env` 設定 **FLOW_CALENDAR_URL**（Power Automate「建立 Outlook 事件」Flow 的 HTTP POST URL）後，可執行：
+在 `.env` 設定 **SCHEDULE_OUTPUT_FILE**（手動觸發 Flow 時 Agent 寫入的排程檔路徑）後，可執行：
 
 ```bash
 py -X utf8 src/agent.py schedule-nextweek
 ```
 
-- 會將 **延續到下週** 與 **下週到期需準備** 的任務，從 **下週一 9:00**（當地時區）起依序建立行事曆事件。
+- 會將 **延續到下週** 與 **下週到期需準備** 的任務，依工作時段與行事曆空檔排入（週一執行時為本週，其餘為下週）。
 - 每筆任務的長度使用標題中的估時（如 `[2h]`）；無估時則使用 `DEFAULT_TASK_DURATION_MINUTES`（預設 60 分）。
-- Flow 2 設定步驟請見 [Power_Automate_Flow_設定步驟.md](Power_Automate_Flow_設定步驟.md) 的「Flow 2：建立 Outlook 行事曆事件」。
+- Flow 2 設定步驟請見 [Flow2.md](Flow2.md)。
