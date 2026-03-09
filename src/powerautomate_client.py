@@ -136,7 +136,7 @@ def parse_duration_minutes_from_title(title: str) -> Optional[int]:
 
 
 def get_next_week_range(tz_name: str) -> tuple[datetime, datetime]:
-    """下週一 00:00 ~ 下週日 23:59:59.999999 於指定時區。無 zoneinfo 時用 UTC。"""
+    """以程式執行日為基準：下週 = 明天 00:00 ~ (今天+7天) 23:59:59.999999（共 7 天）。無 zoneinfo 時用 UTC。"""
     if ZoneInfo is None:
         tz = timezone.utc
     else:
@@ -145,21 +145,27 @@ def get_next_week_range(tz_name: str) -> tuple[datetime, datetime]:
         except Exception:
             tz = timezone.utc
     now = datetime.now(tz)
-    # 下週一：今天 weekday() 0=Mon .. 6=Sun，下週一 = 現在 + (7 - weekday) 天，再設 00:00
-    days_until_next_monday = (7 - now.weekday()) % 7
-    if days_until_next_monday == 0:
-        days_until_next_monday = 7
-    start = (now + timedelta(days=days_until_next_monday)).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
-    end = start + timedelta(days=6, hours=23, minutes=59, seconds=59, microseconds=999999)
+    start = (now.date() + timedelta(days=1))
+    start = datetime(start.year, start.month, start.day, 0, 0, 0, 0, tzinfo=tz)
+    end_date = now.date() + timedelta(days=7)
+    end = datetime(end_date.year, end_date.month, end_date.day, 23, 59, 59, 999999, tzinfo=tz)
     return start, end
 
 
 def get_last_week_range(tz_name: str) -> tuple[datetime, datetime]:
-    """上週一 00:00 ~ 上週日 23:59:59（與 get_next_week_range 同一套週定義，往前 7 天）。"""
-    start, end = get_next_week_range(tz_name)
-    return start - timedelta(days=7), end - timedelta(days=7)
+    """以程式執行日為基準：上週 = (今天-6天) 00:00 ~ 今天 23:59:59.999999（共 7 天）。"""
+    if ZoneInfo is None:
+        tz = timezone.utc
+    else:
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            tz = timezone.utc
+    now = datetime.now(tz)
+    start_date = now.date() - timedelta(days=6)
+    start = datetime(start_date.year, start_date.month, start_date.day, 0, 0, 0, 0, tzinfo=tz)
+    end = datetime(now.date().year, now.date().month, now.date().day, 23, 59, 59, 999999, tzinfo=tz)
+    return start, end
 
 
 def _parse_time(s: str) -> tuple[int, int]:
@@ -484,9 +490,10 @@ def build_weekly_report_html(
     stats: dict[str, Any],
     page_title: str = "",
     tz_name: Optional[str] = None,
+    next_week_tasks: Optional[list[dict[str, Any]]] = None,
 ) -> str:
     """
-    產出週報 HTML：任務表格（Priority, Item, Prog %, Start, End, BW spent %, 過去一週報告）、上週會議列表、會議時間統計。
+    產出週報 HTML：第一表格「上一週任務回顧」、第二表格「下一週任務安排」（兩表之間留空）、上週會議列表、會議時間統計。
     BW spent % 與 過去一週報告 留白。
     """
     tz = timezone.utc
@@ -495,11 +502,14 @@ def build_weekly_report_html(
             tz = ZoneInfo(tz_name or LOCAL_TIMEZONE)
         except Exception:
             pass
+    next_week_tasks = next_week_tasks or []
+    col_header = "<th>Priority</th><th>Item</th><th>Prog %</th><th>Start</th><th>End</th><th>BW spent %</th><th>過去一週報告</th>"
     parts = [
         "<!DOCTYPE html><html><head><meta charset='utf-8'/></head><body>",
         f"<h1>{html.escape(page_title)}</h1>",
+        "<h2>上一週任務回顧</h2>",
         "<table border='1' cellpadding='4' cellspacing='0'><thead><tr>",
-        "<th>Priority</th><th>Item</th><th>Prog %</th><th>Start</th><th>End</th><th>BW spent %</th><th>過去一週報告</th>",
+        col_header,
         "</tr></thead><tbody>",
     ]
     for t in tasks:
@@ -511,6 +521,21 @@ def build_weekly_report_html(
         parts.append(
             f"<tr><td>{t.get('priority', '')}</td><td>{title}</td><td>{pct_str}</td>"
             f"<td>{start_str}</td><td>{end_str}</td><td></td><td></td></tr>"
+        )
+    parts.append("</tbody></table>")
+    parts.append("<p style='margin-top: 1.5em; margin-bottom: 1.5em;'></p>")
+    parts.append("<h2>下一週任務安排</h2>")
+    parts.append("<table border='1' cellpadding='4' cellspacing='0'><thead><tr>")
+    parts.append(col_header)
+    parts.append("</tr></thead><tbody>")
+    for t in next_week_tasks:
+        pct = t.get("percentComplete")
+        pct_str = f"{int(pct)}%" if pct is not None else "-"
+        end_str = _fmt_date_only(t.get("dueDateTime"), tz)
+        title = html.escape(str(t.get("title") or ""))
+        parts.append(
+            f"<tr><td>{t.get('priority', '')}</td><td>{title}</td><td>{pct_str}</td>"
+            f"<td></td><td>{end_str}</td><td></td><td></td></tr>"
         )
     parts.append("</tbody></table>")
     parts.append("<h2>上週會議</h2><ul>")
@@ -547,6 +572,8 @@ def write_weekly_report_to_file(
         }
     tasks, _last_start, _last_end = get_last_week_report_tasks(file_path, tz_name)
     meetings, stats = get_last_week_meetings_and_stats(file_path, tz_name)
+    report = build_next_week_report(file_path=file_path, tz_name=tz_name)
+    next_week_tasks = report.get("carryover", []) + report.get("upcoming_due", [])
     now = datetime.now(timezone.utc)
     if ZoneInfo and (tz_name or LOCAL_TIMEZONE):
         try:
@@ -555,7 +582,9 @@ def write_weekly_report_to_file(
         except Exception:
             pass
     title_str = page_title or now.strftime("%Y/%m/%d")
-    html_content = build_weekly_report_html(tasks, meetings, stats, page_title=title_str, tz_name=tz_name)
+    html_content = build_weekly_report_html(
+        tasks, meetings, stats, page_title=title_str, tz_name=tz_name, next_week_tasks=next_week_tasks
+    )
     out_dir = Path(SCHEDULE_OUTPUT_FILE).parent if SCHEDULE_OUTPUT_FILE else Path.cwd()
     out_path = out_dir / "weekly_report.json"
     payload = {
@@ -566,7 +595,15 @@ def write_weekly_report_to_file(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
-    return {"written_file": str(out_path), "tasks_count": len(tasks), "meetings_count": len(meetings)}
+    return {
+        "written_file": str(out_path),
+        "tasks_count": len(tasks),
+        "meetings_count": len(meetings),
+        "next_week_tasks_count": len(next_week_tasks),
+        "last_week_task_titles": [str(t.get("title") or "") for t in tasks],
+        "meeting_subjects": [str(m.get("subject") or "") for m in meetings],
+        "next_week_task_titles": [str(t.get("title") or "") for t in next_week_tasks],
+    }
 
 
 def load_raw_tasks_and_buckets_from_file(
@@ -965,12 +1002,6 @@ def write_schedule_requests_to_file(
     if week_end.tzinfo is None:
         week_end = week_end.replace(tzinfo=tz)
 
-    # 週一執行時改排入「本週」（與行事曆同一週），其餘日子仍排「下週」
-    now_local = datetime.now(tz)
-    if now_local.weekday() == 0:
-        week_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-        week_end = week_start + timedelta(days=6, hours=23, minutes=59, seconds=59, microseconds=999999)
-
     work_windows = build_work_windows(week_start, week_end, tz)
     busy_list = load_calendar_events_from_file(file_path or TASKS_INPUT_FILE)
     free_slots = busy_to_free(work_windows, busy_list)
@@ -978,7 +1009,12 @@ def write_schedule_requests_to_file(
     events: list[dict[str, Any]] = []
     not_scheduled: list[dict[str, Any]] = []
     for i, task in enumerate(tasks):
-        mins = task.get("estimatedMinutes") or default_dur
+        # 缺少 [xhr] 估時者不排入，列在「無法排入空檔的任務」
+        est = task.get("estimatedMinutes")
+        if est is None or (isinstance(est, (int, float)) and est <= 0):
+            not_scheduled.append(task)
+            continue
+        mins = int(est) if isinstance(est, (int, float)) else default_dur
         if mins <= 0:
             mins = default_dur
         title = task.get("title", "Planner 任務")

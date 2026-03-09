@@ -73,21 +73,25 @@ concat(formatDateTime(addDays(utcNow(), sub(0, add(dayOfWeek(utcNow()), 6))), 'y
 concat(formatDateTime(addDays(utcNow(), -7), 'yyyy-MM-dd'), 'T00:00:00Z')
 ```
 
-### End time（下週日 23:59:59 UTC）
+### End time（下週日 23:59:59 UTC，須涵蓋「下週一」）
 
-在 **End time** 欄位右側點 **fx**，貼上以下運算式。
+若使用 `startOfWeek(utcNow(), 'Sunday') + 7`，得到的是「本週日再過 7 天」= 某個週日 23:59，**會漏掉下週一**（例如 3/16），導致排程誤判該日無會議。請改用以 **本週一** 為基準、加 **13 天**（本週一 + 7 = 下週一，下週一 + 6 = 下週日）：
 
-**請直接使用：**
+**請直接使用（推薦）：**
 
 ```text
-concat(formatDateTime(addDays(startOfWeek(utcNow(), 'Sunday'), 7), 'yyyy-MM-dd'), 'T23:59:59Z')
+concat(formatDateTime(addDays(startOfWeek(utcNow(), 'Monday'), 13), 'yyyy-MM-dd'), 'T23:59:59Z')
 ```
+
+說明：本週一 -7 = 上週一（Start）；本週一 +13 = 下週日（End），區間涵蓋上週、本週、下週整週，含下週一。
 
 **若仍報錯，可改試（不含 Z）：**
 
 ```text
-concat(formatDateTime(addDays(startOfWeek(utcNow(), 'Sunday'), 7), 'yyyy-MM-dd'), 'T23:59:59')
+concat(formatDateTime(addDays(startOfWeek(utcNow(), 'Monday'), 13), 'yyyy-MM-dd'), 'T23:59:59')
 ```
+
+**舊寫法（勿用，會漏下週一）：** `addDays(startOfWeek(utcNow(), 'Sunday'), 7)` 只到「某週日」23:59，下週一不在範圍內。
 
 ### 若 Start / End 只接受「日期」、不要時間
 
@@ -102,7 +106,7 @@ formatDateTime(addDays(startOfWeek(utcNow(), 'Monday'), -7), 'yyyy-MM-dd')
 **End time（下週日，當日結束）：**
 
 ```text
-formatDateTime(addDays(startOfWeek(utcNow(), 'Sunday'), 7), 'yyyy-MM-dd')
+formatDateTime(addDays(startOfWeek(utcNow(), 'Monday'), 13), 'yyyy-MM-dd')
 ```
 
 連接器若會把 End 解讀為「該日結束」，用上面即可；若需明確 23:59:59，再改用上方字串寫法。

@@ -173,24 +173,24 @@ def run_schedule_nextweek():
         ws = result.get("week_start_date")
         we = result.get("week_end_date")
         week_label = f"（排入 {ws} ~ {we}）" if ws and we else ""
+        not_scheduled = result.get("not_scheduled", [])
+        n_not = len(not_scheduled)
         print(f"\n已將 {n} 筆行事曆事件寫入：{path} {week_label}")
+        print(f"  已排入行事曆：{n} 筆；無法排入空檔：{n_not} 筆")
+        if n > 0:
+            print("\n【已排入行事曆】下列任務已寫入 schedule_requests.json，執行 Flow 後會建立 Outlook 事件：")
+            for i, ev in enumerate(result.get("events", []), 1):
+                subj = ev.get("subject", "")
+                start = ev.get("start", "")[:16] if ev.get("start") else ""
+                print(f"  {i}. {subj}  {start}")
+        if not_scheduled:
+            print("\n【無法排入空檔】下列任務未寫入（缺估時或無空檔），請手動安排或補上 [xhr] 後重跑：")
+            for i, t in enumerate(not_scheduled, 1):
+                print(f"  {i}. {t.get('title', '')}")
         print("\n請依序完成：")
         print("  1. 等待 OneDrive 同步該檔案（若路徑在 OneDrive 資料夾內）。")
         print("  2. 到 Power Automate 手動執行「從檔案建立 Outlook 事件」Flow。")
         print("  3. 到 Outlook 行事曆確認事件已建立。")
-        if n > 0:
-            print("\n本批事件（已排入空檔）：")
-            for ev in result.get("events", [])[:15]:
-                print(f"  - {ev.get('subject', '')}")
-            if n > 15:
-                print(f"  ... 共 {n} 筆")
-        not_scheduled = result.get("not_scheduled", [])
-        if not_scheduled:
-            print("\n無法排入空檔的任務（請手動安排或延後）：")
-            for t in not_scheduled[:20]:
-                print(f"  - {t.get('title', '')}")
-            if len(not_scheduled) > 20:
-                print(f"  ... 共 {len(not_scheduled)} 筆")
         return
     print("請在 .env 設定 FLOW_CALENDAR_URL（HTTP 觸發）或 SCHEDULE_OUTPUT_FILE（手動觸發時 Agent 寫入的排程檔路徑）。")
 
@@ -251,8 +251,27 @@ def run_weekly_report():
     path = result.get("written_file", "")
     n_tasks = result.get("tasks_count", 0)
     n_meetings = result.get("meetings_count", 0)
+    n_next = result.get("next_week_tasks_count", 0)
     print(f"\n已產出上週週報：{path}")
-    print(f"  任務 {n_tasks} 筆、會議 {n_meetings} 筆")
+    print(f"  上一週任務 {n_tasks} 筆、上週會議 {n_meetings} 筆、下一週任務 {n_next} 筆")
+    last_titles = result.get("last_week_task_titles") or []
+    if last_titles:
+        print("\n【上一週任務回顧】列入週報的任務：")
+        for i, title in enumerate(last_titles, 1):
+            short = (title[:60] + "…") if len(title) > 60 else title
+            print(f"  {i}. {short}")
+    meetings_list = result.get("meeting_subjects") or []
+    if meetings_list:
+        print("\n【上週會議】列入週報的會議：")
+        for i, subj in enumerate(meetings_list, 1):
+            short = (subj[:60] + "…") if len(subj) > 60 else subj
+            print(f"  {i}. {short}")
+    next_titles = result.get("next_week_task_titles") or []
+    if next_titles:
+        print("\n【下一週任務安排】列入週報的任務：")
+        for i, title in enumerate(next_titles, 1):
+            short = (title[:60] + "…") if len(title) > 60 else title
+            print(f"  {i}. {short}")
     print("\n請依序完成：")
     print("  1. 等待 OneDrive 同步該檔案（若路徑在 OneDrive 資料夾內）。")
     print("  2. 到 Power Automate 手動執行「從檔案建立 Outlook 事件」Flow（Flow 會先建立 Outlook 事件，再讀取 weekly_report.json 於 OneNote 指定 section 新增週報頁面）。")
