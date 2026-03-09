@@ -19,6 +19,7 @@ if USE_PA:
         schedule_tasks_in_free_slots,
         schedule_next_week_to_calendar,
         write_schedule_requests_to_file,
+        write_weekly_report_to_file,
         create_weekly_status_page,
         build_planner_summary_html,
         build_calendar_summary_html,
@@ -227,9 +228,36 @@ def run_guide():
     print("執行本指引： py -m src.agent guide\n")
 
 
+def run_weekly_report():
+    """產出上週週報（任務 + 會議 + 統計）寫入 weekly_report.json，由 CreateOutlookEvent Flow 建立事件後讀取並建立 OneNote 頁面。"""
+    if not USE_PA:
+        print("週報產出目前僅支援 Power Automate 模式，請設 USE_POWER_AUTOMATE=true 與 TASKS_INPUT_FILE。")
+        return
+    try:
+        result = write_weekly_report_to_file()
+    except FileNotFoundError as e:
+        print(e)
+        print("請先手動執行 GotPlannerTasks Flow，並確認已寫入 TASKS_INPUT_FILE（且含上週行事曆）。")
+        return
+    except Exception as e:
+        print("產出週報失敗：", e)
+        return
+    if result.get("message"):
+        print(result["message"])
+        return
+    path = result.get("written_file", "")
+    n_tasks = result.get("tasks_count", 0)
+    n_meetings = result.get("meetings_count", 0)
+    print(f"\n已產出上週週報：{path}")
+    print(f"  任務 {n_tasks} 筆、會議 {n_meetings} 筆")
+    print("\n請依序完成：")
+    print("  1. 等待 OneDrive 同步該檔案（若路徑在 OneDrive 資料夾內）。")
+    print("  2. 到 Power Automate 手動執行「從檔案建立 Outlook 事件」Flow（Flow 會先建立 Outlook 事件，再讀取 weekly_report.json 於 OneNote 指定 section 新增週報頁面）。")
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["planner", "schedule", "onenote", "all", "guide", "nextweek", "schedule-nextweek"])
+    parser.add_argument("action", choices=["planner", "schedule", "onenote", "all", "guide", "nextweek", "schedule-nextweek", "weekly-report"])
     parser.add_argument("--bucket", nargs="*", default=None)
     parser.add_argument("--duration", type=int, default=None)
     args = parser.parse_args()
@@ -241,6 +269,9 @@ def main():
         return
     if args.action == "schedule-nextweek":
         run_schedule_nextweek()
+        return
+    if args.action == "weekly-report":
+        run_weekly_report()
         return
     if args.action == "planner":
         run_planner_summary(bucket_names=args.bucket)
